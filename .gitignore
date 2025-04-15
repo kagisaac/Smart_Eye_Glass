@@ -4,6 +4,26 @@ venv/
 # Ignore model weights (you can always re-download them)
 *.pt
 
+#other heavy file
+
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.db
+*.sqlite3
+.DS_Store
+.env
+*.h5
+*.pt
+*.pth
+*.onnx
+*.tflite
+*.log
+.idea/
+.vscode/
+*.zip
+
 # Ignore image captures and test outputs
 captured_images/
 test_outputs/
