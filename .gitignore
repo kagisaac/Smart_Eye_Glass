@@ -1,0 +1,17 @@
+# Ignore virtual environment
+venv/
+
+# Ignore model weights (you can always re-download them)
+*.pt
+
+# Ignore image captures and test outputs
+captured_images/
+test_outputs/
+test_images/
+
+# Ignore Python cache
+__pycache__/
+*.pyc
+
+# Ignore VSCode settings
+.vscode/
