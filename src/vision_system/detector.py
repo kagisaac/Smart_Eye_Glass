@@ -1,135 +1,214 @@
 import cv2
 import numpy as np
+from typing import Any, List, Dict, Tuple, Optional
+import logging
 from ultralytics import YOLO
 import time
-from typing import Any, List, Dict, Tuple
-from .speech_manager import SpeechManager
+
+# Import SpeechManager
+from vision_system.speech_manager import SpeechManager
 
 class ObjectDetector:
+    """Object detector using YOLO with speech feedback for blind users."""
+    
     def __init__(self, model_path: str = 'yolov8s.pt'):
-        """Initialize YOLO model and speech manager."""
+        """
+        Initialize the object detector.
+        
+        Args:
+            model_path: Path to YOLO model
+        """
         try:
-            print("\n🔄 Loading YOLO model...")
+            print("🔄 Loading YOLO model...")
+            # Initialize YOLO model
             self.model = YOLO(model_path)
-            # Optimized detection settings
-            self.model.conf = 0.45
-            self.model.iou = 0.45
-            self.model.max_det = 300
             
-            # Initialize speech manager
+            # Initialize speech manager for announcements
             self.speech_manager = SpeechManager()
             
-            # Detection state tracking
-            self.last_announcement = {}
-            self.announcement_cooldown = 1.0  # seconds
+            # Detection settings
+            self.confidence_threshold = 0.45
+            self.min_announcement_interval = 2.0  # seconds
             self.last_announcement_time = 0
+            self.previous_detections = []
+            self.detection_history = {}
             
             print("✅ YOLO model loaded.")
-        except Exception as e:
-            print(f"❌ Error loading YOLO model: {str(e)}")
-            raise Exception(f"Failed to initialize YOLO model: {str(e)}")
-
-    def detect(self, frame: np.ndarray) -> Any:
-        """Detect objects in frame."""
-        try:
-            # Enhance image for better detection
-            enhanced_frame = self._enhance_image(frame)
             
+        except Exception as e:
+            print(f"❌ Failed to initialize object detector: {str(e)}")
+            raise
+    
+    def detect(self, frame: np.ndarray) -> Optional[List[Dict]]:
+        """
+        Detect objects in frame.
+        
+        Args:
+            frame: Input frame
+            
+        Returns:
+            List of detection dictionaries or None on error
+        """
+        try:
             # Run detection
-            results = self.model(enhanced_frame, verbose=False)
-            return results[0]
+            results = self.model(frame, conf=self.confidence_threshold)[0]
+            
+            # Format results
+            detections = []
+            for result in results.boxes.data.tolist():
+                x1, y1, x2, y2, confidence, class_id = result
+                
+                # Get class name
+                class_name = results.names[int(class_id)]
+                
+                detections.append({
+                    'bbox': [int(x1), int(y1), int(x2), int(y2)],
+                    'confidence': confidence,
+                    'class': class_name
+                })
+                
+            return detections
+            
         except Exception as e:
-            print(f"❌ Error in detection: {str(e)}")
+            logging.error(f"Detection error: {str(e)}")
             return None
-
-    def draw_detections(self, frame: np.ndarray, detections: Any) -> Tuple[np.ndarray, List[Dict]]:
-        """Draw detections on frame and handle speech output."""
-        if not hasattr(detections, 'boxes') or not detections.boxes.data.any():
-            return frame, []
-
-        detection_info = []
-        current_detections = {}
+    
+    def draw_detections(self, frame: np.ndarray, detections: List[Dict]) -> Tuple[np.ndarray, List[Dict]]:
+        """
+        Draw enhanced bounding boxes and labels for detections.
+        
+        Args:
+            frame: Input frame
+            detections: List of detection dictionaries
+            
+        Returns:
+            Tuple of (annotated frame, significant detections)
+        """
+        significant_detections = []
+        
+        # Create a copy of the frame
+        annotated_frame = frame.copy()
+        
+        # Draw each detection
+        for detection in detections:
+            bbox = detection['bbox']
+            confidence = detection['confidence']
+            class_name = detection['class']
+            
+            # Skip detections with low confidence
+            if confidence < self.confidence_threshold:
+                continue
+                
+            # Add to significant detections
+            significant_detections.append(detection)
+            
+            # Extract box coordinates
+            x1, y1, x2, y2 = bbox
+            
+            # Calculate color based on confidence
+            # Higher confidence: more green, less red
+            green = int(min(confidence * 2, 1.0) * 255)
+            red = int((1.0 - min(confidence, 0.8)) * 255)
+            color = (0, green, red)  # BGR format
+            
+            # Draw semi-transparent filled rectangle for better visibility
+            overlay = annotated_frame.copy()
+            cv2.rectangle(overlay, (x1, y1), (x2, y2), color, -1)  # Filled rectangle
+            annotated_frame = cv2.addWeighted(overlay, 0.2, annotated_frame, 0.8, 0)  # Blend with 0.2 opacity
+            
+            # Draw solid bounding box border
+            cv2.rectangle(annotated_frame, (x1, y1), (x2, y2), color, 2)
+            
+            # Prepare label with class and confidence
+            label = f"{class_name}: {confidence:.2f}"
+            
+            # Get text size
+            text_size, baseline = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
+            
+            # Calculate label position (above the box if possible)
+            text_y = max(0, y1 - 5)
+            
+            # Draw background for label text (fully filled rectangle)
+            cv2.rectangle(annotated_frame, 
+                         (x1, text_y - text_size[1] - baseline), 
+                         (x1 + text_size[0] + 10, text_y + baseline), 
+                         color, cv2.FILLED)
+            
+            # Draw label text (in white for better contrast)
+            cv2.putText(annotated_frame, label, (x1 + 5, text_y), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2, cv2.LINE_AA)
+        
+        # Return annotated frame and significant detections
+        return annotated_frame, significant_detections
+    
+    def announce_detections(self, detections: List[Dict]):
+        """
+        Announce significant changes in detections.
+        
+        Args:
+            detections: List of detection dictionaries
+        """
         current_time = time.time()
-
-        # Process all detections first
-        for box in detections.boxes.data:
-            x1, y1, x2, y2, conf, cls = box
-            x1, y1, x2, y2 = map(int, [x1, y1, x2, y2])
-            cls_id = int(cls)
+        
+        # Skip if not enough time has passed since last announcement
+        if current_time - self.last_announcement_time < self.min_announcement_interval:
+            return
             
-            # Get class name
-            cls_name = detections.names[cls_id] if hasattr(detections, 'names') else f"Class {cls_id}"
+        # Skip if no detections
+        if not detections:
+            return
             
-            # Update current detections count
-            current_detections[cls_name] = current_detections.get(cls_name, 0) + 1
+        # Update detection history
+        current_classes = {}
+        for detection in detections:
+            class_name = detection['class']
+            confidence = detection['confidence']
             
-            # Draw detection
-            color = self._get_color(cls_id)
-            cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-            
-            # Add label with confidence
-            label = f"{cls_name}: {conf:.2f}"
-            label_size = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 2)[0]
-            cv2.rectangle(frame, (x1, y1 - label_size[1] - 10), (x1 + label_size[0], y1), color, -1)
-            cv2.putText(frame, label, (x1, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
-            
-            # Add to detection info
-            detection_info.append({
-                'class': cls_name,
-                'confidence': float(conf),
-                'bbox': (x1, y1, x2, y2)
-            })
-
-        # Check if we should make a new announcement
-        if current_time - self.last_announcement_time >= self.announcement_cooldown:
-            # Compare with last announcement to only announce changes
+            # Count only if confidence is high enough
+            if confidence >= self.confidence_threshold:
+                if class_name in current_classes:
+                    current_classes[class_name] += 1
+                else:
+                    current_classes[class_name] = 1
+        
+        # Check what's new compared to previous announcement
+        new_classes = {}
+        for class_name, count in current_classes.items():
+            # Class is new or count increased significantly
+            if (class_name not in self.detection_history or 
+                count > self.detection_history.get(class_name, 0) + 1):
+                new_classes[class_name] = count
+        
+        # Prepare announcement
+        if new_classes:
             announcement_parts = []
-            for cls_name, count in current_detections.items():
-                if cls_name not in self.last_announcement or self.last_announcement[cls_name] != count:
-                    if count == 1:
-                        announcement_parts.append(f"one {cls_name}")
-                    else:
-                        announcement_parts.append(f"{count} {cls_name}s")
             
-            if announcement_parts:
-                announcement = "Detected " + ", and ".join(announcement_parts)
-                self.speech_manager.say(announcement, priority=True)
-                self.last_announcement = current_detections.copy()
-                self.last_announcement_time = current_time
-
-        return frame, detection_info
-
-    def _enhance_image(self, image: np.ndarray) -> np.ndarray:
-        """Enhance image for better detection."""
-        try:
-            # Convert to LAB color space
-            lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
-            l, a, b = cv2.split(lab)
+            for class_name, count in new_classes.items():
+                if count == 1:
+                    announcement_parts.append(f"1 {class_name}")
+                else:
+                    announcement_parts.append(f"{count} {class_name}s")
             
-            # Apply CLAHE to L channel
-            clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-            l = clahe.apply(l)
+            # Format natural language announcement
+            if len(announcement_parts) == 1:
+                announcement = announcement_parts[0]
+            elif len(announcement_parts) == 2:
+                announcement = f"{announcement_parts[0]} and {announcement_parts[1]}"
+            else:
+                announcement = ", ".join(announcement_parts[:-1]) + f", and {announcement_parts[-1]}"
             
-            # Merge channels and convert back
-            lab = cv2.merge([l, a, b])
-            enhanced = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
+            # Announce new detections
+            self.speech_manager.say(f"Detected {announcement}", priority=True, category="object")
             
-            return enhanced
-        except Exception as e:
-            print(f"❌ Error enhancing image: {str(e)}")
-            return image
-
-    def _get_color(self, class_id: int) -> Tuple[int, int, int]:
-        """Get color for visualization."""
-        colors = [
-            (0, 255, 0),    # Green
-            (0, 0, 255),    # Red
-            (255, 0, 0),    # Blue
-            (0, 255, 255),  # Yellow
-        ]
-        return colors[class_id % len(colors)]
-
+            # Update state
+            self.last_announcement_time = current_time
+            self.detection_history = current_classes
+    
     def cleanup(self):
         """Clean up resources."""
-        self.speech_manager.cleanup()
-        
+        try:
+            # Clean up speech manager
+            if hasattr(self, 'speech_manager'):
+                self.speech_manager.cleanup()
+        except Exception as e:
+            logging.error(f"Error during detector cleanup: {str(e)}")
