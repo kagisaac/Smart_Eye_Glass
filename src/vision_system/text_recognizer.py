@@ -1,143 +1,160 @@
 import cv2
 import numpy as np
-import pytesseract
+import easyocr
 import pyttsx3
-import threading
-import queue
-from typing import Optional
-from langdetect import detect
 import time
-from .speech_manager import SpeechManager
+from typing import Optional
 
 class TextRecognizer:
     def __init__(self):
-        """Initialize text recognition with optimized settings."""
-        # OCR Configuration
-        self.custom_config = r'--oem 3 --psm 6'
-        
-        # TTS Queue and Thread
-        self.tts_queue = queue.Queue()
-        self.tts_thread = threading.Thread(target=self._tts_worker, daemon=True)
-        self.is_running = True
-        self.tts_thread.start()
-        
-        # Track last spoken text and time
-        self.last_text = ""
-        self.last_spoken_time = 0
-        self.min_speak_interval = 1.0  # seconds
-        
-        # Initialize speech manager for system announcements
-        self.speech_manager = SpeechManager()
-        
+        """Initialize text recognition with EasyOCR and text-to-speech."""
+        print("Initializing EasyOCR (this may take a moment)...")
+        self.reader = easyocr.Reader(['en'], gpu=False)
+
+        # Speech setup
+        self.speech_manager = pyttsx3.init()
+        self.speech_manager.setProperty('rate', 150)
+        self.speech_manager.setProperty('volume', 1.0)
+
+        # State flags
+        self.should_stop = False
+        self.is_processing = False
+
         print("✅ Text Recognizer initialized")
 
-    def recognize_text(self, image: np.ndarray) -> Optional[str]:
-        """Recognize text in image."""
-        try:
-            # Skip if image is too small
-            if image.shape[0] < 20 or image.shape[1] < 20:
-                return None
-
-            # Announce start of recognition
-            self.speech_manager.say("Starting text recognition")
-
-            # Preprocess image
-            processed = self._preprocess_image(image)
-            
-            # Perform OCR
-            text = pytesseract.image_to_string(processed, config=self.custom_config).strip()
-            
-            if not text:
-                self.speech_manager.say("No text detected")
-                return None
-
-            current_time = time.time()
-            
-            # Only speak if the text is different or enough time has passed
-            if (text != self.last_text or 
-                current_time - self.last_spoken_time >= self.min_speak_interval):
-                self.last_text = text
-                self.last_spoken_time = current_time
-                self._queue_text_for_speaking(text)
-            
-            return text
-
-        except Exception as e:
-            print(f"❌ Error in text recognition: {str(e)}")
-            self.speech_manager.say("Error during text recognition")
+    def recognize_text(self, image: np.ndarray, is_capture: bool = False) -> Optional[str]:
+        """Recognize and optionally read text from the given image."""
+        if self.is_processing:
+            self.speak("Already processing text. Please wait.")
             return None
 
-    def _preprocess_image(self, image: np.ndarray) -> np.ndarray:
-        """Optimize image for OCR."""
-        try:
-            # Convert to grayscale
-            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-            
-            # Apply adaptive thresholding
-            binary = cv2.adaptiveThreshold(
-                gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
-                cv2.THRESH_BINARY, 11, 2
-            )
-            
-            # Denoise
-            denoised = cv2.fastNlMeansDenoising(binary)
-            
-            # Enhance contrast
-            enhanced = cv2.convertScaleAbs(denoised, alpha=1.5, beta=0)
-            
-            return enhanced
-            
-        except Exception as e:
-            print(f"❌ Error in image preprocessing: {str(e)}")
-            return image
+        self.is_processing = True
+        self.should_stop = False
+        best_text = ""
+        highest_confidence = 0.0
 
-    def _queue_text_for_speaking(self, text: str):
-        """Queue text for TTS processing."""
         try:
-            # Detect language
-            lang = detect(text)
-            self.tts_queue.put((text, lang))
-        except Exception as e:
-            print(f"❌ Error queueing text: {str(e)}")
+            if image.shape[0] < 20 or image.shape[1] < 20:
+                self.speak("Image is too small for text recognition.")
+                return None
 
-    def _tts_worker(self):
-        """Background worker for TTS processing."""
-        engine = None
-        try:
-            engine = pyttsx3.init()
-            engine.setProperty('rate', 150)
-            engine.setProperty('volume', 0.9)
-            
-            while self.is_running:
-                try:
-                    # Get text from queue with timeout
-                    text, lang = self.tts_queue.get(timeout=0.5)
-                    
-                    # Set voice based on language
-                    voices = engine.getProperty('voices')
-                    for voice in voices:
-                        if lang in voice.languages:
-                            engine.setProperty('voice', voice.id)
-                            break
-                    
-                    # Speak text
-                    engine.say(text)
-                    engine.runAndWait()
-                    
-                except queue.Empty:
-                    continue
-                except Exception as e:
-                    print(f"❌ Error in TTS: {str(e)}")
-                    time.sleep(0.1)
-                    
+            if is_capture:
+                self.speak("Processing captured image for text recognition.")
+
+            # Generate preprocessed images
+            preprocessed_images = self._get_preprocessed_versions(image)
+
+            for processed_img in preprocessed_images:
+                if self.should_stop:
+                    self.speak("Text recognition interrupted.")
+                    return None
+
+                results = self.reader.readtext(processed_img)
+                if results:
+                    texts = [text for _, text, _ in results]
+                    confidences = [conf for _, _, conf in results]
+                    avg_conf = sum(confidences) / len(confidences)
+
+                    combined_text = ' '.join(texts)
+                    if avg_conf > highest_confidence and self._is_valid_text(combined_text):
+                        best_text = combined_text
+                        highest_confidence = avg_conf
+
+            if not best_text:
+                self.speak("No readable text detected in the image.")
+                return None
+
+            # Split and read detected text
+            sentences = self._split_into_sentences(best_text)
+            self.speak("Starting to read the detected text.")
+            for sentence in sentences:
+                if self.should_stop:
+                    self.speak("Text reading interrupted.")
+                    break
+                self.speak(sentence)
+                time.sleep(0.5)
+
+            if not self.should_stop:
+                self.speak("Finished reading the text.")
+
+            return best_text
+
         except Exception as e:
-            print(f"❌ Error initializing TTS engine: {str(e)}")
+            print(f"❌ Error during text recognition: {e}")
+            self.speak("An error occurred during text recognition.")
+            return None
+
         finally:
-            if engine:
-                engine.stop()
+            self.is_processing = False
+            self.should_stop = False
+
+    def interrupt(self):
+        """Interrupt the recognition and speech process."""
+        self.should_stop = True
+        print("🛑 Interrupt signal received.")
+
+    def _get_preprocessed_versions(self, image: np.ndarray) -> list:
+        """Generate various enhanced versions of the image for better OCR."""
+        versions = [image]
+
+        try:
+            # Grayscale version
+            if len(image.shape) == 3:
+                gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+                versions.append(gray)
+
+            # CLAHE-enhanced version
+            if len(image.shape) == 3:
+                lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
+                l, a, b = cv2.split(lab)
+                clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+                cl = clahe.apply(l)
+                enhanced_lab = cv2.merge((cl, a, b))
+                enhanced_bgr = cv2.cvtColor(enhanced_lab, cv2.COLOR_LAB2BGR)
+                versions.append(enhanced_bgr)
+
+            # Denoised version
+            denoised = cv2.fastNlMeansDenoisingColored(image, None, 10, 10, 7, 21)
+            versions.append(denoised)
+
+        except Exception as e:
+            print(f"⚠️ Preprocessing error: {e}")
+
+        return versions
+
+    def _is_valid_text(self, text: str) -> bool:
+        """Ensure recognized text is meaningful (has enough alphabetic content)."""
+        if not text:
+            return False
+        letter_ratio = sum(c.isalpha() for c in text) / max(1, len(text))
+        return letter_ratio > 0.2
+
+    def _split_into_sentences(self, text: str) -> list:
+        """Split recognized text into readable sentences."""
+        sentences = []
+        sentence = ""
+        for char in text:
+            sentence += char
+            if char in '.!?':
+                if sentence.strip():
+                    sentences.append(sentence.strip())
+                    sentence = ""
+        if sentence.strip():
+            sentences.append(sentence.strip())
+        return sentences
+
+    def speak(self, text: str):
+        """Speak the provided text using TTS."""
+        try:
+            if not self.should_stop:
+                print(f"🔊 Speaking: {text}")
+                self.speech_manager.say(text)
+                self.speech_manager.runAndWait()
+        except Exception as e:
+            print(f"❌ Speech error: {e}")
 
     def cleanup(self):
-        """Clean up resources."""
-        self.is_running = False
-        if self.tts_thread.is_alive():
-            self.tts_thread.join(timeout=1.0)
+        """Stop ongoing speech and mark for interruption."""
+        self.should_stop = True
+        if hasattr(self, 'speech_manager'):
+            self.speech_manager.stop()
