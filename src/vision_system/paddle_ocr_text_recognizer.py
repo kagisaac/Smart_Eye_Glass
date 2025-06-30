@@ -3,7 +3,7 @@ import numpy as np
 import time
 import threading
 import os
-from paddleocr import PaddleOCR, draw_ocr
+from paddleocr import PaddleOCR
 from langdetect import detect, LangDetectException
 from typing import Optional, List, Dict, Tuple, Any
 from .speech_manager import SpeechManager
@@ -22,21 +22,19 @@ class PaddleOCRRecognizer:
             use_gpu: Whether to use GPU acceleration (if available)
         """
         try:
-            logging.info("🔄 Initializing PaddleOCR text recognition system...")
+            logging.info("📄 Initializing PaddleOCR text recognition system...")
             
             # Initialize PaddleOCR with optimal settings for this use case
             # Using English model as fallback for Kinyarwanda
+            # Note: PaddleOCR 3.x uses 'device' parameter instead of 'use_gpu'
+            device = 'gpu' if use_gpu else 'cpu'
+            
+            # Initialize PaddleOCR with minimal parameters for 3.x compatibility
             self.ocr = PaddleOCR(
                 use_angle_cls=True,  # Detect text orientation
-                lang='en',           # English model (will adapt for Kinyarwanda)
-                use_gpu=use_gpu,     # GPU usage based on availability
-                show_log=False,      # Disable verbose logging
-                # Optimization parameters for better detection
-                rec_algorithm='CRNN',
-                det_db_thresh=0.3,   # Lower threshold for better detection of low contrast text
-                det_db_box_thresh=0.5,
-                det_db_unclip_ratio=1.8,  # Higher value to better separate adjacent text
-                rec_batch_num=6      # Batch processing for efficiency
+                lang='en'            # English model (will adapt for Kinyarwanda)
+                # Note: PaddleOCR 3.x has simplified initialization
+                # Many parameters from 2.x are not available or handled automatically
             )
             
             # Initialize speech manager for audio feedback
@@ -421,14 +419,14 @@ class PaddleOCRRecognizer:
             if not os.path.exists(debug_dir):
                 os.makedirs(debug_dir)
                 
-            # Create annotated image
+            # Create annotated image - manual implementation for PaddleOCR 3.x
             boxes = [line[0] for line in result]
             txts = [line[1][0] for line in result]
             scores = [line[1][1] for line in result]
             
-            # Draw annotations
+            # Draw annotations manually since draw_ocr might not be available in 3.x
             im_show = image.copy()
-            im_show = draw_ocr(im_show, boxes, txts, scores)
+            im_show = self._manual_draw_ocr(im_show, boxes, txts, scores)
             
             # Save the image
             timestamp = int(time.time())
@@ -441,6 +439,57 @@ class PaddleOCRRecognizer:
                 
         except Exception as e:
             logging.error(f"❌ Error saving annotated image: {str(e)}")
+
+    def _manual_draw_ocr(self, image: np.ndarray, boxes: List, txts: List, scores: List) -> np.ndarray:
+        """
+        Manually draw OCR results on image since draw_ocr might not be available in PaddleOCR 3.x
+        
+        Args:
+            image: Input image
+            boxes: List of text boxes
+            txts: List of recognized texts
+            scores: List of confidence scores
+            
+        Returns:
+            Annotated image
+        """
+        try:
+            img = image.copy()
+            font = cv2.FONT_HERSHEY_SIMPLEX
+            
+            for i, (box, txt, score) in enumerate(zip(boxes, txts, scores)):
+                if score < 0.5:  # Skip low confidence detections
+                    continue
+                    
+                # Convert box to integer points
+                box = np.array(box, dtype=np.int32)
+                
+                # Draw bounding box
+                cv2.polylines(img, [box], True, (0, 255, 0), 2)
+                
+                # Prepare text with confidence score
+                display_text = f"{txt} ({score:.2f})"
+                
+                # Get text size for background rectangle
+                (text_width, text_height), baseline = cv2.getTextSize(
+                    display_text, font, 0.5, 1)
+                
+                # Draw background rectangle for text
+                text_x, text_y = box[0][0], box[0][1] - 10
+                cv2.rectangle(img, 
+                            (text_x, text_y - text_height - baseline),
+                            (text_x + text_width, text_y + baseline),
+                            (0, 255, 0), -1)
+                
+                # Draw text
+                cv2.putText(img, display_text, (text_x, text_y), 
+                           font, 0.5, (0, 0, 0), 1)
+            
+            return img
+            
+        except Exception as e:
+            logging.error(f"❌ Error in manual OCR drawing: {str(e)}")
+            return image
 
     def detect_language(self, text: str) -> str:
         """
