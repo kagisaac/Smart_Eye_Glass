@@ -1,5 +1,7 @@
 #!/usr/bin/env python
 import cv2
+import matplotlib
+matplotlib.use('Agg')
 import numpy as np
 import time
 import os
@@ -17,7 +19,8 @@ logging.basicConfig(
 
 # Import detector and OCR modules
 from vision_system.detector import ObjectDetector
-from vision_system.paddle_ocr_text_recognizer import PaddleOCRRecognizer
+#from vision_system.paddle_ocr_text_recognizer import PaddleOCRRecognizer
+from vision_system.tesseract_ocr_text_recognizer import TesseractOCRRecognizer
 
 class VisionAssistanceSystem:
     """Main vision assistance system for blind users with object detection and text recognition."""
@@ -39,7 +42,9 @@ class VisionAssistanceSystem:
             self.detector = ObjectDetector(model_path)
             
             # Initialize text recognizer with PaddleOCR
-            self.text_recognizer = PaddleOCRRecognizer(use_gpu=use_gpu)
+            #self.text_recognizer = PaddleOCRRecognizer(use_gpu=use_gpu)
+            self.text_recognizer = TesseractOCRRecognizer()
+
             
             # Initialize camera
             self.camera = cv2.VideoCapture(camera_id)
